@@ -1,0 +1,455 @@
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+#Load library
+library(AER)
+library(car)
+library(alr4)
+library(ALSM)
+library(onewaytests)
+library(MASS)
+library("Hmisc")
+library(leaps)
+library(caret)
+library(fmsb)
+library(lmridge)
+library(ISLR)
+library(boot)
+
+#Aquire data
+data("Affairs")   
+
+#Convert variables to a binary variable
+Affairs['affairsyes'] = (Affairs[,'affairs'] > 0)* 1 
+Affairs['gendermale']<-ifelse(Affairs[,'gender']=='male', 1,0)
+Affairs['childrenyes']<-ifelse(Affairs[,'children']=='yes', 1,0)
+Affairs <- Affairs[,-c(1,2,5) ]  #remove original columns
+
+Affairs['Case'] = seq(1,nrow(Affairs),1)   #add a column in order to number cases
+
+```
+
+
+```{r}
+
+#Part Zero: Data at a glance
+
+names(Affairs)
+dim(Affairs)
+
+  ##Plot a scatter plot
+plot(Affairs[,1:9])  #create scatter plot
+
+  ##Plot explanatory variables according to case number 
+attach(Affairs)
+par(mfrow = c(3,3))
+plot(age)
+plot(yearsmarried)
+plot(religiousness)
+plot(education)
+plot(occupation)
+plot(rating)
+plot(affairsyes)
+plot(gendermale)
+plot(childrenyes) 
+
+  ##Plot histogram of explanatory variables
+par(mfrow = c(3,3))
+hist(Affairs$gendermale)
+hist(Affairs$age)
+hist(Affairs$yearsmarried)
+hist(Affairs$childrenyes)
+hist(Affairs$religiousness)
+hist(Affairs$education)
+hist(Affairs$occupation)
+hist(Affairs$rating)
+
+```
+
+
+```{r}
+
+#Part One: Selection of a proper model 
+
+#1. Try to fit in a linear regression model
+aff.lm <- lm(affairsyes~gendermale+age+yearsmarried+childrenyes+religiousness+education+occupation+rating, data=Affairs)
+
+summary(aff.lm)
+anova(aff.lm)   
+
+residualPlots(aff.lm)
+outlierTest(aff.lm)  # Bonferonni p-value for most extreme obs
+leveragePlots(aff.lm)  # leverage plots
+residualPlots(aff.lm)
+qqPlot(aff.lm, main="QQ Plot")  #qq plot for studentized resid 
+shapiro.test(aff.lm$residuals)  #shapiro normality test
+
+
+##Conclusion: residuals don't follow normal distribution and RSE is 0.4122 which is very large, r^2 is small.
+##So we try to make the Box-Cox power transformation to fix residuals to follow normality. However, we find whatever the lambda value is used as the power to Y, it doesn't make any change for Y due to its 0 and 1 value. Therefore, linear model is not a good model for our data.
+
+```
+
+
+```{r}
+
+#2. Try to fit a logistic model
+aff <- glm(affairsyes~gendermale+age+yearsmarried+childrenyes+religiousness+education+occupation+rating, data=Affairs,family=binomial)
+
+coef(aff)  #Get coefficience of predictors
+exp(aff$coefficients)  #Get the original coefficients
+summary(aff)
+anova(aff)
+
+plot(aff) 
+
+
+# Predict the probability (p) of having extramarital affairs
+probabilities <- predict(aff,type="response")
+predicted.classes <- ifelse(probabilities > 0.5, "yes", "no")
+head(predicted.classes)
+
+
+```
+
+
+```{r}
+
+#   (1) Goodness of fit
+
+library("ResourceSelection")
+
+hoslem.test(Affairs$affairsyes, fitted(aff))
+#Hosmer and Lemeshow goodness of fit (GOF) test
+
+##Conclusion: accept H0, our data have a good fit
+```
+
+```{r}
+
+#Part two: Diagnotics
+
+#   (1) Linearity (X are linearly related to the log odds)
+
+library(dplyr)
+library("tidyr")
+
+  ## Bind the logit and tidying the data for plot
+mydata <- Affairs %>%
+  mutate(logit = log(probabilities/(1-probabilities))) %>%
+  gather(key = "predictors", value = "predictor.value", -logit)
+
+  ## Check the linear relationship between predictor variables and the logit of the outcome
+library("ggplot2")
+ggplot(mydata, aes(logit, predictor.value)) + geom_point(size = 0.5, alpha = 0.5) + geom_smooth(method = "loess") + theme_bw() + facet_wrap(~predictors, scales = "free_y")
+
+##We can observed a significant linearship from predictors of childrenyes, rating, religious, and yearmarried.
+
+```
+
+```{r}
+
+#   (2) Outliers and Influential points
+
+library(car)
+
+  ##X outliers
+hat<-lm.influence(aff)$hat
+#rev(sort(abs(hat)))  #display hat from large to small
+Xoutliers <- as.numeric(names(hat)[(abs(hat) > 2*mean(hat, na.rm=T))])  # outliers row numbers
+Xoutliers
+as.data.frame(Affairs[c(3,44,61,75,80,97,157,166,167,170,176,190,213,243,259,276,318,393,405,464,477,487,510,513,517,547,550,551,571,579,588), ])  # show X outliers observations
+
+  ##Y outliers
+rstu <- rstudent(aff)
+#rev(sort(abs(rstu)))  #display rstudendize deleted residuals from large to small
+t <- qt((1-0.05/(2*nrow(Affairs))),(aff$df.residual-1))  #calculate ts
+Youtliers <- as.numeric(names(rstu)[(abs(rstu) > c(t))])  # outliers row numbers
+Youtliers
+as.data.frame(Affairs[Youtliers, ])  # influential observations.
+outlierTest(aff,cutoff=t)  # Bonferonni p-value for most extreme obs ???
+
+  ##Influential Points
+cooksd <- cooks.distance(aff)
+#rev(sort(abs(cooksd)))  #display Cook's distance from large to small
+cutoff <- qf(0.2, 9, aff$df.residual) # identify D values
+influential <- as.numeric(names(cooksd)[(abs(cooksd) > c(cutoff))])  # influential row numbers
+influential
+as.data.frame(Affairs[influential, ])  # influential observations.
+
+  ## Cook's D plot
+plot(aff, which=4, cook.levels=cutoff)
+
+  ## Influence Plot 
+influencePlot(aff)
+
+  ## Residual plots and other plots
+residualPlots(aff)
+boxplot(Affairs[,1:9])
+plot(aff)
+
+##We have a few X outliers but less than 10% of sample size, and have no Y outliers and influencial points which is good. 
+
+```
+
+
+```{r}
+
+#   (3) Residual (constant) check
+
+residualPlots(aff)
+avPlots(aff) # added variable plots
+
+
+  ##BF constant test
+Affairs$aff<-aff$fitted.values
+Affairs$resid<-aff$residuals
+Affairs$group<-cut(Affairs$aff, 5)
+bf.test(resid~group, Affairs) 
+
+  ##shapiro normality test
+shapiro.test(Affairs$resid)
+
+
+
+```
+
+
+```{r}
+
+#   (4) Multicollinearity 
+
+  ##correlation matrix
+round(cor(Affairs[,1:9]),4) #round to four decimal place
+
+  ## Calculate Variance Inflation Factor (VIF)
+car::vif(glm(gendermale~age+yearsmarried+childrenyes+religiousness+education+occupation+rating, data=Affairs))
+car::vif(glm(age~gendermale+yearsmarried+childrenyes+religiousness+education+occupation+rating, data=Affairs))
+car::vif(glm(yearsmarried~age+gendermale+childrenyes+religiousness+education+occupation+rating, data=Affairs))
+car::vif(glm(childrenyes~age+gendermale+yearsmarried+religiousness+education+occupation+rating, data=Affairs))
+car::vif(glm(religiousness~age+gendermale+yearsmarried+childrenyes+education+occupation+rating, data=Affairs))
+car::vif(glm(education~age+gendermale+yearsmarried+childrenyes+religiousness+occupation+rating, data=Affairs))
+car::vif(glm(occupation~age+gendermale+yearsmarried+childrenyes+religiousness+education+rating, data=Affairs))
+car::vif(glm(rating~age+gendermale+yearsmarried+childrenyes+religiousness+education+occupation, data=Affairs))
+
+```
+
+
+
+
+
+```{r}
+
+# Part Three: Model selection
+
+# 1. Best Subset Selection
+
+aff.full=regsubsets(affairsyes~gendermale+age+yearsmarried+childrenyes+religiousness+education+occupation+rating, data = Affairs,nvmax=8) #all subset selection 
+summary(aff.full)
+
+reg.summary=summary(aff.full)
+names(reg.summary)
+reg.summary$rss
+reg.summary$adjr2
+reg.summary$cp
+reg.summary$bic
+
+
+par(mfrow=c(2,2))
+plot(reg.summary$rss,xlab="Number of Variables",ylab="RSS",type="l")
+which.min(reg.summary$rss)  #RSE selects full model
+points(8,reg.summary$rss[8], col="red",cex=2,pch=20)
+
+plot(reg.summary$adjr2,xlab="Number of Variables",ylab="Adjusted RSq",type="l")
+which.max(reg.summary$adjr2)  #adjusted r^2 selects the 6-predictor model
+points(6,reg.summary$adjr2[6], col="red",cex=2,pch=20)
+
+plot(reg.summary$cp,xlab="Number of Variables",ylab="Cp",type='l')
+which.min(reg.summary$cp)   #Cp (which is the same as AIC) selects the 5-predictor model
+points(5,reg.summary$cp[5],col="red",cex=2,pch=20)
+
+plot(reg.summary$bic,xlab="Number of Variables",ylab="BIC",type='l')
+which.min(reg.summary$bic)  #BIC selects 3-predictor model (BIC always selects model with fewer predictors)
+points(3,reg.summary$bic[3],col="red",cex=2,pch=20)
+
+##Conclusion: Different criterion selects different model.
+
+```
+
+```{r}
+
+#2. Forward and Backward Stepwise Selection
+
+  ##Forward Stepwise Selection
+aff.fwd=regsubsets(affairsyes~gendermale+age+yearsmarried+childrenyes+religiousness+education+occupation+rating, data = Affairs, nvmax=8, method="forward")
+summary(aff.fwd)
+
+  ##Backward Stepwise Selection
+aff.bwd=regsubsets(affairsyes~gendermale+age+yearsmarried+childrenyes+religiousness+education+occupation+rating, data = Affairs, nvmax=8, method="backward")
+summary(aff.bwd)
+
+coef(aff.full,5)  # coefficient of best subset selection with 5 variables
+coef(aff.fwd,5)   # coefficient of forward stepwise selection with 5 variables
+coef(aff.bwd,5)   # coefficient of backward stepwise selection with 5 variables
+
+  ##Method 2
+step(aff, direction="both")
+
+##Conclusion: Based on AIC criterion, both forward and backward stepwise selection select 5-predictor model. 
+
+```
+
+
+```{r}
+
+#3. K-Fold Cross-Validation
+
+cv.error.8 = cv.glm(Affairs,aff,K=10)$delta[1]
+cv.error.8  #Return the 10-fold cross-validation estimate of prediction error for the full model
+
+aff7 = glm(affairsyes~gendermale+age+yearsmarried+childrenyes+religiousness+occupation+rating,data=Affairs)
+cv.error.7 = cv.glm(Affairs,aff7,K=10)$delta[1]
+cv.error.7  #Return the 10-fold cross-validation estimate of prediction error for the 7-predictor model
+
+aff6 = glm(affairsyes~gendermale+age+yearsmarried+childrenyes+religiousness+rating,data=Affairs)
+cv.error.6 = cv.glm(Affairs,aff6,K=10)$delta[1]
+cv.error.6  
+
+aff5 = glm(affairsyes~gendermale+age+yearsmarried+religiousness+rating, data=Affairs)
+cv.error.5 = cv.glm(Affairs,aff5,K=10)$delta[1]
+cv.error.5
+
+aff4 = glm(affairsyes~age+yearsmarried+religiousness+rating, data=Affairs)
+cv.error.4 = cv.glm(Affairs,aff4,K=10)$delta[1]
+cv.error.4
+
+aff3 = glm(affairsyes~yearsmarried+religiousness+rating, data=Affairs)
+cv.error.3 = cv.glm(Affairs,aff3,K=10)$delta[1]
+cv.error.3
+
+aff2 = glm(affairsyes~religiousness+rating, data=Affairs)
+cv.error.2 = cv.glm(Affairs,aff2,K=10)$delta[1]
+cv.error.2
+
+aff1 = glm(affairsyes~rating, data=Affairs)
+cv.error.1 = cv.glm(Affairs,aff1,K=10)$delta[1]
+cv.error.1
+
+which.min(c(cv.error.1,cv.error.2,cv.error.3,cv.error.4,cv.error.5,cv.error.6,cv.error.7,cv.error.8)) #Compare the returned error value. The lower the estimated predicted error, the better the model perform
+
+##Conclusion: Although the 10-fold cv method selects the full model, predicted errors from different models don't have much difference which means the smaller size of predictor will have a economic advantage. Combined with Best subset and Stepwise selection, We chose the 5-predictor model.
+##P.S. Since we can't find new data from website to test our model, we use 10-fold cv method to test our model.
+
+```
+
+
+```{r}
+
+# Part Four: Fit in the new logictic model
+
+aff.red <- glm(affairsyes ~ gendermale + age  + yearsmarried +  religiousness + rating, data = Affairs)
+
+summary(aff.red)
+anova(aff.red)
+
+```
+
+
+```{r}
+
+#   (1) Goodness of fit
+
+library("ResourceSelection")
+
+hoslem.test(Affairs$affairsyes, fitted(aff.red))
+#Hosmer and Lemeshow goodness of fit (GOF) test
+
+##Conclusion: accept H0, our data have a good fit
+```
+
+
+```{r}
+
+#1. Diagnotics
+
+#   (2) Residuals (constant) check
+
+residualPlots(aff.red)
+avPlots(aff.red) # added variable plots
+
+
+  ##BF constant test
+Affairs$aff.red<-aff.red$fitted.values
+Affairs$residN<-aff.red$residuals
+Affairs$groupN<-cut(Affairs$aff.red, 5)
+bf.test(residN~groupN, Affairs) 
+
+  ##shapiro normality test
+shapiro.test(aff.red$residuals)
+
+residualPlots(aff.red)
+
+```
+
+```{r}
+
+#   (3) Outliers
+library(car)
+
+  ##X outliers
+hatN<-lm.influence(aff.red)$hat
+#rev(sort(abs(hat)))  #display hat from large to small
+XoutliersN <- as.numeric(names(hatN)[(abs(hatN) > 2*mean(hatN, na.rm=T))])  # outliers row numbers
+XoutliersN
+as.data.frame(Affairs[c(3,44,61,75,80,97,157,166,167,170,176,190,213,243,259,276,318,393,405,464,477,487,510,513,517,547,550,551,571,579,588), ])  # show X outliers observations
+
+  ##Y outliers
+rstuN <- rstudent(aff.red)
+#rev(sort(abs(rstu)))  #display rstudendize deleted residuals from large to small
+tN <- qt((1-0.05/(2*nrow(Affairs))),(aff.red$df.residual-1))  #calculate ts
+YoutliersN <- as.numeric(names(rstuN)[(abs(rstuN) > c(tN))])  # outliers row numbers
+YoutliersN
+as.data.frame(Affairs[YoutliersN, ])  # influential observations.
+outlierTest(aff.red,cutoff=t)  # Bonferonni p-value for most extreme obs ???
+
+  ##Influential Points
+cooksdN <- cooks.distance(aff.red)
+#rev(sort(abs(cooksd)))  #display Cook's distance from large to small
+cutoffN <- qf(0.2, 9, aff.red$df.residual) # identify D values
+influentialN <- as.numeric(names(cooksdN)[(abs(cooksdN) > c(cutoffN))])  # influential row numbers
+influentialN
+as.data.frame(Affairs[influentialN, ])  # influential observations.
+
+  ## Cook's D plot
+plot(aff.red, which=4, cook.levels=cutoffN)
+
+  ## Influence Plot 
+influencePlot(aff.red)
+
+  ## Residual plots and other plots
+residualPlots(aff.red)
+boxplot(Affairs[,c(1,2,3,6,7,8)])
+
+
+```
+
+
+```{r}
+
+# Multicollinearity
+
+car::vif(glm(gendermale~age+yearsmarried+religiousness+rating, data=Affairs))
+car::vif(glm(age~gendermale+yearsmarried+religiousness+rating, data=Affairs))
+car::vif(glm(yearsmarried~age+gendermale+religiousness+rating, data=Affairs))
+car::vif(glm(religiousness~age+gendermale+yearsmarried+rating, data=Affairs))
+car::vif(glm(rating~age+gendermale+yearsmarried+religiousness, data=Affairs))
+
+round(cor(Affairs[,c(1,2,3,6,7,8)]),4) #round correlation matrix to four decimal place
+
+```
+
+
+
